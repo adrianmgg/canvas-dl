@@ -1,0 +1,42 @@
+[project]
+name = "canvas-dl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "amgg", email = "2adrian2@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.12.15",
+    "click>=8.1.8",
+    "pydantic>=2.11.7",
+]
+
+[project.scripts]
+canvas-dl = "canvas_dl:cli"
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.17.1",
+    "ruff>=0.12.10",
+]
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+struct = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["ANN", "B", "A"]
+
+[tool.ruff.format]
+quote-style = "single"
+line-ending = "lf"
+skip-magic-trailing-comma = false

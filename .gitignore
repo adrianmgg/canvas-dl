@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# other tool generated files
+# ruff
+.ruff_cache/
+# mypy
+.mypy_cache/
+
+# things that shouldn't get committed
+cookies.txt
