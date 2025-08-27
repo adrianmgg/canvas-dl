@@ -1,21 +1,17 @@
-from canvas_dl.canvas.models import File
-from typing import (
-    AsyncIterator,
-    TypedDict,
-    Unpack,
-)
+import http.cookies
 import operator
+import typing
+from contextlib import AbstractAsyncContextManager
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from types import TracebackType
+from typing import AsyncIterator, TypedDict, Unpack
+
 import aiohttp
 import aiohttp.typedefs
 from aiohttp import ClientSession
-from contextlib import AbstractAsyncContextManager
-import typing
-import http.cookies
-from http.cookiejar import MozillaCookieJar
-from yarl import URL
 from pydantic import TypeAdapter
+from yarl import URL
 
 from canvas_dl.canvas import models
 
@@ -42,14 +38,10 @@ class AioHttpMozillaCookieJar(aiohttp.cookiejar.CookieJar):
         self.update_cookies(cookies)
 
 
-class _ApiTypes:
-    type params = dict[str, str | list[str]]
-    type method = str
-
-
 class _ApiKwargs(TypedDict, total=False):
-    params: _ApiTypes.params
-    method: _ApiTypes.method
+    params: dict[str, str | list[str]]
+    include: list[str]
+    method: str
 
 
 class Canvas(AbstractAsyncContextManager['Canvas', None]):
@@ -84,13 +76,17 @@ class Canvas(AbstractAsyncContextManager['Canvas', None]):
         return self.url.joinpath('api/v1/')
 
     async def _api(
-        self,
-        path: str | URL,
-        /,
-        *,
-        params: _ApiTypes.params | None = None,
-        method: _ApiTypes.method = 'GET',
+        self, path: str | URL, /, **kwargs: Unpack[_ApiKwargs]
     ) -> aiohttp.ClientResponse:
+        method = kwargs.pop('method', 'GET')
+        params = kwargs.pop('params', {})
+        match kwargs.pop('include', None):
+            case list(include_param):
+                params['include[]'] = include_param
+        if len(kwargs) > 0:
+            raise TypeError(
+                f'got unexpected keyword argument(s) {", ".join(map(repr, kwargs.keys()))}'
+            )
         match URL(path):
             case URL(absolute=True) as absolute_url:
                 url = absolute_url
@@ -101,11 +97,7 @@ class Canvas(AbstractAsyncContextManager['Canvas', None]):
         return response
 
     async def _api_json[T](
-        self,
-        type_: type[T],
-        path: str | URL,
-        /,
-        **kwargs: Unpack[_ApiKwargs],
+        self, type_: type[T], path: str | URL, /, **kwargs: Unpack[_ApiKwargs]
     ) -> tuple[aiohttp.ClientResponse, T]:
         response = await self._api(path, **kwargs)
         # print(await response.text())
@@ -113,11 +105,7 @@ class Canvas(AbstractAsyncContextManager['Canvas', None]):
 
     # https://developerdocs.instructure.com/services/canvas/basics/file.pagination
     async def _paginate[T](
-        self,
-        type_: type[T],
-        path: str | URL,
-        /,
-        **kwargs: Unpack[_ApiKwargs],
+        self, type_: type[T], path: str | URL, /, **kwargs: Unpack[_ApiKwargs]
     ) -> AsyncIterator[T]:
         Page = list[type_]  # type: ignore[valid-type]
         # some kwargs need to be passed on for every page, but the ones that effect the final url should *not* be
@@ -139,31 +127,29 @@ class Canvas(AbstractAsyncContextManager['Canvas', None]):
         return self._paginate(
             models.Course,
             'courses',
-            params={
-                'include[]': [
-                    'needs_grading_count',
-                    'syllabus_body',
-                    'public_description',
-                    'total_scores',
-                    'current_grading_period_scores',
-                    'grading_periods',
-                    'term',
-                    'account',
-                    'course_progress',
-                    'sections',
-                    'storage_quota_used_mb',
-                    'total_students',
-                    'passback_status',
-                    'favorites',
-                    'teachers',
-                    'observed_users',
-                    'tabs',
-                    'course_image',
-                    'banner_image',
-                    'concluded',
-                    'post_manually',
-                ]
-            },
+            include=[
+                'needs_grading_count',
+                'syllabus_body',
+                'public_description',
+                'total_scores',
+                'current_grading_period_scores',
+                'grading_periods',
+                'term',
+                'account',
+                'course_progress',
+                'sections',
+                'storage_quota_used_mb',
+                'total_students',
+                'passback_status',
+                'favorites',
+                'teachers',
+                'observed_users',
+                'tabs',
+                'course_image',
+                'banner_image',
+                'concluded',
+                'post_manually',
+            ],
         )
 
     # https://developerdocs.instructure.com/services/canvas/resources/files#method.folders.list_all_folders
@@ -171,9 +157,22 @@ class Canvas(AbstractAsyncContextManager['Canvas', None]):
         return self._paginate(models.Folder, f'courses/{course_id}/folders')
 
     # https://developerdocs.instructure.com/services/canvas/resources/files#method.files.api_index
-    def list_folder_files(self, folder_id: int) -> AsyncIterator[File]:
+    def list_folder_files(self, folder_id: int) -> AsyncIterator[models.File]:
         return self._paginate(
-            models.File,
-            f'folders/{folder_id}/files',
-            params={'include[]': ['user', 'usage_rights']},
+            models.File, f'folders/{folder_id}/files', include=['user', 'usage_rights']
+        )
+
+    # https://developerdocs.instructure.com/services/canvas/resources/modules#method.context_modules_api.index
+    def list_course_modules(self, course_id: models.CourseId) -> AsyncIterator[models.Module]:
+        # specifically *not* using the items,content_details include[]s here, since they aren't guranteed to actually always be included if requested
+        return self._paginate(models.Module, f'courses/{course_id}/modules')
+
+    # https://developerdocs.instructure.com/services/canvas/resources/modules#method.context_module_items_api.index
+    def list_module_items(
+        self, course_id: models.CourseId, module_id: models.ModuleId
+    ) -> AsyncIterator[models.ModuleItem]:
+        return self._paginate(
+            models.ModuleItem,
+            f'courses/{course_id}/modules/{module_id}/items',
+            include=['content_details'],
         )

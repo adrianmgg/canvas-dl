@@ -1,17 +1,31 @@
 import datetime
-from typing import NewType
+from typing import Any, Literal, NewType, Self
 
-from pydantic import BaseModel
+import pydantic
+from pydantic import BaseModel, model_validator
 
 
 class Model(BaseModel):
     class Config:
         extra = 'allow'
 
+    _raw: None | Any = None
+
+    # TODO add a wrap validator to debug log any extra fields
+
+    @model_validator(mode='wrap')
+    @classmethod
+    def store_raw_data(cls, data: Any, handler: pydantic.ModelWrapValidatorHandler[Self]) -> Self:  # noqa: ANN401
+        ret = handler(data)
+        ret._raw = data
+        return ret
+
 
 CourseId = NewType('CourseId', int)
 FolderId = NewType('FolderId', int)
 FileId = NewType('FileId', int)
+ModuleId = NewType('ModuleId', int)
+ModuleItemId = NewType('ModuleItemId', int)
 
 
 # https://developerdocs.instructure.com/services/canvas/resources/courses#course
@@ -78,3 +92,68 @@ class File(Model):
     media_entry_id: str | None
     """ "identifier for file in third-party transcoding service" """
     # ... more fields ...
+
+
+# https://developerdocs.instructure.com/services/canvas/resources/modules
+class Module(Model):
+    id: ModuleId
+    position: int
+    """ "the position of this module in the course (1-based)" """
+    name: str
+    unlock_at: datetime.datetime | None = None
+    require_sequential_progress: bool
+    """ "Whether module items must be unlocked in order" """
+    requirement_type: str  # TODO enum
+    prerequisite_module_ids: list[ModuleId]
+    items_count: int
+    items_url: str
+    items: None = None
+    """ (always null since we will not be using include[]=items) """
+    state: str  # TODO enum
+    completed_at: datetime.datetime | None = None
+    publish_final_grade: bool | None = None
+    # other documented fields: published
+
+
+# https://developerdocs.instructure.com/services/canvas/resources/modules
+class ModuleItemCompletionRequirement(Model):
+    pass  # TODO
+
+
+# https://developerdocs.instructure.com/services/canvas/resources/modules
+class ModuleItemContentDetails(Model):
+    pass  # TODO
+
+
+# https://developerdocs.instructure.com/services/canvas/resources/modules
+class ModuleItem(Model):
+    id: ModuleItemId
+    module_id: ModuleId
+    position: int
+    """ "the position of this item in the module (1-based)" """
+    title: str
+    indent: int
+    """ "0-based indent level; module items may be indented to show a hierarchy" """
+    type: Literal[
+        'File',
+        'Page',
+        'Discussion',
+        'Assignment',
+        'Quiz',
+        'SubHeader',
+        'ExternalUrl',
+        'ExternalTool',
+    ]
+    """ "the type of object referred to" """
+    content_id: int | None = None
+    """ "the id of the object referred to. applies to 'File', 'Discussion', 'Assignment', 'Quiz', 'ExternalTool' types" """
+    html_url: str
+    """ "link to the item in Canvas" """
+    url: str | None = None
+    """ "link to the Canvas API object, if applicable" """
+    page_url: str | None = None
+    """ "(only for 'Page' type) unique locator for the linked wiki page" """
+    external_url: str | None = None
+    completion_requirement: ModuleItemCompletionRequirement | None = None
+    content_details: ModuleItemContentDetails
+    # other documented fields: new_tab, published
