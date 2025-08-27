@@ -6,11 +6,34 @@ import sqlite3
 from functools import cache, cached_property
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, assert_never, cast, overload
+from typing import TYPE_CHECKING, Any, Callable, Self, assert_never, cast, overload
 
 from pydantic import TypeAdapter
 
 from canvas_dl.canvas import models
+
+
+class TableDescriptor[DB, Info, Handler]:
+    handler: Callable[[Info, DB], Handler]
+    info: Info
+
+    def __init__(self, handler: Callable[[Info, DB], Handler], info: Info) -> None:
+        self.handler = handler
+        self.info = info
+
+    @overload
+    def __get__(self, obj: None, objtype: Any = None) -> Self: ...  # noqa: ANN401
+    @overload
+    def __get__(self, obj: DB, objtype: Any = None) -> Handler: ...  # noqa: ANN401
+    def __get__(self, obj, objtype=None):
+        match obj:
+            case None:
+                return self
+            case db:
+                return self.handler(self.info, db)
+
+    def __repr__(self) -> str:
+        return f'TableDescriptor(info={self.info!r}, handler={self.handler!r})'
 
 
 class _DBResourceTableInfo[M: models.Model, ID](abc.ABC):
@@ -20,9 +43,6 @@ class _DBResourceTableInfo[M: models.Model, ID](abc.ABC):
 
     @abc.abstractmethod
     def id_to_column_dict(self, id_: ID, /) -> dict[str, int]: ...
-
-    def descriptor(self) -> '_DBResourceTableDescriptor[M, ID]':
-        return _DBResourceTableDescriptor(self)
 
     def query_select(self, what: str | tuple[str, ...], *, current_only: bool = True) -> str:
         match what:
@@ -88,25 +108,7 @@ class _DBRTI_WithinCourseModule[M: models.Model, MainID: int](
         return {'id': id_, 'course_id': course_id, 'module_id': module_id}
 
 
-class _DBResourceTableDescriptor[M: models.Model, ID]:
-    info: _DBResourceTableInfo[M, ID]
-
-    def __init__(self, info: _DBResourceTableInfo[M, ID], /) -> None:
-        self.info = info
-
-    @overload
-    def __get__(self, obj: 'None', objtype: Any = None) -> Self: ...
-    @overload
-    def __get__(self, obj: 'CanvasDB', objtype: Any = None) -> '_DBResourceTableBound[M, ID]': ...
-    def __get__(
-        self, obj: 'CanvasDB | None', objtype: Any = None
-    ) -> 'Self | _DBResourceTableBound[M, ID]':
-        if obj is None:
-            return self
-        return _DBResourceTableBound(self.info, obj)
-
-
-class _DBResourceTableBound[M: models.Model, ID]:
+class _DBResourceTable[M: models.Model, ID]:
     __info: _DBResourceTableInfo[M, ID]
     __db: 'CanvasDB'
 
@@ -154,7 +156,9 @@ class _DBResourceTableBound[M: models.Model, ID]:
 
     def insert(self, id_: ID, item: M, /, *, dry_run: bool = False) -> tuple[bool, int]:
         """
-        return value is tuple of (did we actually write a new item to the db?, the version number of the written item)
+        return value is tuple of (did we actually write a new item to the db?, version number of the written item)
+
+        if `dry_run=True` passed, will give what the return value would be for those arguments, but no actual db changes will be made
         """
         source_date = datetime.datetime.now()  # TODO should be time of request not time of db write
         with self.__db_con:
@@ -174,6 +178,7 @@ class _DBResourceTableBound[M: models.Model, ID]:
             )
             if existing_data_hash is not None and existing_data_hash == new_data_hash:
                 if not dry_run:
+                    # TODO last_seen_on should be max'd not just set
                     self.__db_con.execute(
                         f'UPDATE {self.__info.table_name} SET last_seen_on = :last_seen_on WHERE {self.__info.query_where_ids()} AND version = :version',
                         id_cols | {'last_seen_on': source_date, 'version': prev_version},
@@ -205,15 +210,25 @@ class CanvasDB:
     db: sqlite3.Connection
 
     # tables
-    courses = _DBRTI_Simple[models.Course, models.CourseId]('course', models.Course).descriptor()
-    folders = _DBRTI_Simple[models.Folder, models.FolderId]('folder', models.Folder).descriptor()
-    files = _DBRTI_Simple[models.File, models.FileId]('file', models.File).descriptor()
-    modules = _DBRTI_WithinCourse[models.Module, models.ModuleId](
-        'module', models.Module
-    ).descriptor()
-    module_items = _DBRTI_WithinCourseModule[models.ModuleItem, models.ModuleItemId](
-        'moduleitem', models.ModuleItem
-    ).descriptor()
+    courses = TableDescriptor(
+        _DBResourceTable, _DBRTI_Simple[models.Course, models.CourseId]('course', models.Course)
+    )
+    folders = TableDescriptor(
+        _DBResourceTable, _DBRTI_Simple[models.Folder, models.FolderId]('folder', models.Folder)
+    )
+    files = TableDescriptor(
+        _DBResourceTable, _DBRTI_Simple[models.File, models.FileId]('file', models.File)
+    )
+    modules = TableDescriptor(
+        _DBResourceTable,
+        _DBRTI_WithinCourse[models.Module, models.ModuleId]('module', models.Module),
+    )
+    module_items = TableDescriptor(
+        _DBResourceTable,
+        _DBRTI_WithinCourseModule[models.ModuleItem, models.ModuleItemId](
+            'moduleitem', models.ModuleItem
+        ),
+    )
 
     def __init__(self, path: str | PathLike, /) -> None:
         path = Path(path)
