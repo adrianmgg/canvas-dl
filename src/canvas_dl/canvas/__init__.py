@@ -44,6 +44,7 @@ class _ApiKwargs(TypedDict, total=False):
     method: str
 
 
+# TODO: need to implement rate limit/throttling (see https://developerdocs.instructure.com/services/canvas/basics/file.throttling)
 class Canvas(AbstractAsyncContextManager['Canvas', None]):
     url: URL
     _session: ClientSession
@@ -92,8 +93,9 @@ class Canvas(AbstractAsyncContextManager['Canvas', None]):
                 url = absolute_url
             case relative_endpoint:
                 url = self._api_url.join(relative_endpoint)
-        response = await self._session.request(method=method, url=url, params=params)
-        # print(await response.json())
+        response = await self._session.request(
+            method=method, url=url, params=params, raise_for_status=True
+        )
         return response
 
     async def _api_json[T](
@@ -153,14 +155,27 @@ class Canvas(AbstractAsyncContextManager['Canvas', None]):
         )
 
     # https://developerdocs.instructure.com/services/canvas/resources/files#method.folders.list_all_folders
-    def list_course_folders(self, course_id: int) -> AsyncIterator[models.Folder]:
+    def list_course_folders(self, course_id: models.CourseId) -> AsyncIterator[models.Folder]:
         return self._paginate(models.Folder, f'courses/{course_id}/folders')
 
+    # https://developerdocs.instructure.com/services/canvas/resources/files#method.folders.resolve_path
+    async def course_resolve_folder_path(
+        self, course_id: models.CourseId, full_path: str
+    ) -> list[models.Folder]:
+        _response, data = await self._api_json(
+            list[models.Folder], f'courses/{course_id}/folders/by_path/{full_path}'
+        )
+        return data
+
     # https://developerdocs.instructure.com/services/canvas/resources/files#method.files.api_index
-    def list_folder_files(self, folder_id: int) -> AsyncIterator[models.File]:
+    def list_folder_files(self, folder_id: models.FolderId) -> AsyncIterator[models.File]:
         return self._paginate(
             models.File, f'folders/{folder_id}/files', include=['user', 'usage_rights']
         )
+
+    # https://developerdocs.instructure.com/services/canvas/resources/files#method.files.api_index
+    def list_folder_subfolders(self, folder_id: models.FolderId) -> AsyncIterator[models.Folder]:
+        return self._paginate(models.Folder, f'folders/{folder_id}/folders')
 
     # https://developerdocs.instructure.com/services/canvas/resources/modules#method.context_modules_api.index
     def list_course_modules(self, course_id: models.CourseId) -> AsyncIterator[models.Module]:

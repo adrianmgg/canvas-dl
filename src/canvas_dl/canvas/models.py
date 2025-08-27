@@ -1,15 +1,19 @@
 import datetime
+import hashlib
+import json
+from copy import deepcopy
 from typing import Any, Literal, NewType, Self
 
 import pydantic
 from pydantic import BaseModel, model_validator
+from yarl import URL
 
 
 class Model(BaseModel):
     class Config:
         extra = 'allow'
 
-    _raw: None | Any = None
+    _raw: Any
 
     # TODO add a wrap validator to debug log any extra fields
 
@@ -19,6 +23,13 @@ class Model(BaseModel):
         ret = handler(data)
         ret._raw = data
         return ret
+
+    def _normalize_for_db_hash(self, data: Any, /) -> Any:  # noqa: ANN401
+        return data
+
+    def hash_for_db[H: 'hashlib._Hash'](self, h: H, /) -> H:
+        h.update(json.dumps(self._normalize_for_db_hash(self._raw), sort_keys=True).encode('utf-8'))
+        return h
 
 
 CourseId = NewType('CourseId', int)
@@ -47,8 +58,19 @@ class Course(Model):
     locale: str | None = None
     # TODO enrollments
     total_students: int
-    # TODO calendar, default_view, syllabus_body, needs_grading_count, term
-    # etc ...
+    # TODO calendar, default_view, syllabus_body, needs_grading_count, term, etc ...
+    image_download_url: str | None = None
+    banner_image_download_url: str | None = None
+
+    def _normalize_for_db_hash(self, data: Any, /) -> Any:  # noqa: ANN401
+        data = deepcopy(data)
+        for url_key in 'image_download_url', 'banner_image_download_url':
+            if url_key in data and isinstance(url := data[url_key], str):
+                try:
+                    data[url_key] = str(URL(url).without_query_params('token'))
+                except ValueError:  # don't fail if the url is for some reason not able to be parsed
+                    pass
+        return data
 
     def __str__(self) -> str:
         return f'Course<id={self.id!r}, name={self.name!r}>'

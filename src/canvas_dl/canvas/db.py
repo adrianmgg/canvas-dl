@@ -1,11 +1,12 @@
 import abc
 import datetime
+import hashlib
 import json
 import sqlite3
-from functools import cache
+from functools import cache, cached_property
 from os import PathLike
 from pathlib import Path
-from typing import Any, Self, assert_never, cast, overload
+from typing import TYPE_CHECKING, Any, Self, assert_never, cast, overload
 
 from pydantic import TypeAdapter
 
@@ -23,7 +24,6 @@ class _DBResourceTableInfo[M: models.Model, ID](abc.ABC):
     def descriptor(self) -> '_DBResourceTableDescriptor[M, ID]':
         return _DBResourceTableDescriptor(self)
 
-    @cache
     def query_select(self, what: str | tuple[str, ...], *, current_only: bool = True) -> str:
         match what:
             case str(single):
@@ -35,9 +35,16 @@ class _DBResourceTableInfo[M: models.Model, ID](abc.ABC):
             where = f'{where} AND is_current = 1'
         return f'SELECT {what} FROM {self.table_name} WHERE {where}'
 
-    @cache
     def query_where_ids(self) -> str:
-        return '(' + ' AND '.join(f'{n} = ?' for n in self.id_column_names) + ')'
+        return '(' + ' AND '.join(f'{n} = :{n}' for n in self.id_column_names) + ')'
+
+    if not TYPE_CHECKING:
+        query_select = cache(query_select)
+        query_where_ids = cache(query_where_ids)
+
+    @cached_property
+    def query_ids_named_placeholders(self) -> str:
+        return ', '.join(f':{n}' for n in self.id_column_names)
 
 
 class _DBRTI_Simple[M: models.Model, ID: int](_DBResourceTableInfo[M, ID]):
@@ -125,6 +132,8 @@ class _DBResourceTableBound[M: models.Model, ID]:
             'is_current INTEGER NOT NULL CHECK (is_current IN (0, 1))',
             # json blob with the actual info
             'data TEXT NOT NULL',
+            # hash of the data (possibly with some transformations applied beforehand, via code in models.py)
+            'data_hash INTEGER NOT NULL',
         ]
         self.__db_con.execute(f'CREATE TABLE {self.__info.table_name}({", ".join(columns)}) STRICT')
         self.__db_con.execute(
@@ -134,9 +143,7 @@ class _DBResourceTableBound[M: models.Model, ID]:
     def get(self, id_: ID, /) -> M | None:
         with self.__db_con:
             id_cols = self.__info.id_to_column_dict(id_)
-            res = self.__db_con.execute(
-                self.__info.query_select(('data',), tuple(id_cols.values()))
-            )
+            res = self.__db_con.execute(self.__info.query_select(('data',)), id_cols)
             match res.fetchone():
                 case None:
                     return None
@@ -145,31 +152,53 @@ class _DBResourceTableBound[M: models.Model, ID]:
                 case unreachable:
                     assert_never(unreachable)
 
-    def insert(self, id_: ID, item: M, /) -> None:
+    def insert(self, id_: ID, item: M, /, *, dry_run: bool = False) -> tuple[bool, int]:
+        """
+        return value is tuple of (did we actually write a new item to the db?, the version number of the written item)
+        """
         source_date = datetime.datetime.now()  # TODO should be time of request not time of db write
         with self.__db_con:
             id_cols = self.__info.id_to_column_dict(id_)
-            existing_data, prev_version = cast(
+            existing_data_hash, prev_version = cast(
                 tuple[str, int] | None,
                 self.__db_con.execute(
-                    self.__info.query_select(('data', 'version')), tuple(id_cols.values())
+                    self.__info.query_select(('data_hash', 'version')), tuple(id_cols.values())
                 ).fetchone(),
             ) or (None, -1)
             new_data = json.dumps(item._raw, sort_keys=True)
-            if existing_data is not None and existing_data == new_data:
-                self.__db_con.execute(
-                    f'UPDATE {self.__info.table_name} SET last_seen_on = ? WHERE {self.__info.query_where_ids()} AND version = ?',
-                    (source_date, *id_cols.values(), prev_version),
-                )
+            # (we moduldo the hash digest down to a signed 64-bit int since that's what sqlite3 takes)
+            new_data_hash = int.from_bytes(
+                item.hash_for_db(hashlib.sha256(usedforsecurity=False)).digest()[-8:],
+                'big',
+                signed=True,
+            )
+            if existing_data_hash is not None and existing_data_hash == new_data_hash:
+                if not dry_run:
+                    self.__db_con.execute(
+                        f'UPDATE {self.__info.table_name} SET last_seen_on = :last_seen_on WHERE {self.__info.query_where_ids()} AND version = :version',
+                        id_cols | {'last_seen_on': source_date, 'version': prev_version},
+                    )
+                return False, prev_version
             else:
-                self.__db_con.execute(
-                    f'UPDATE {self.__info.table_name} SET is_current = 0 WHERE {self.__info.query_where_ids()} AND version = ?',
-                    (*id_cols.values(), prev_version),
-                )
-                self.__db_con.execute(
-                    f'INSERT INTO {self.__info.table_name} ({", ".join(self.__info.id_column_names)}, saved_on, last_seen_on, version, is_current, data) VALUES({", ".join(["?"] * (len(self.__info.id_column_names) + 5))})',
-                    (*id_cols.values(), source_date, source_date, prev_version + 1, 1, new_data),
-                )
+                new_version = prev_version + 1
+                if not dry_run:
+                    self.__db_con.execute(
+                        f'UPDATE {self.__info.table_name} SET is_current = 0 WHERE {self.__info.query_where_ids()} AND version = :version',
+                        id_cols | {'version': prev_version},
+                    )
+                    self.__db_con.execute(
+                        f'INSERT INTO {self.__info.table_name} VALUES({self.__info.query_ids_named_placeholders}, :saved_on, :last_seen_on, :version, :is_current, :data, :data_hash)',
+                        id_cols
+                        | {
+                            'saved_on': source_date,
+                            'last_seen_on': source_date,
+                            'version': new_version,
+                            'is_current': 1,
+                            'data': new_data,
+                            'data_hash': new_data_hash,
+                        },
+                    )
+                return True, new_version
 
 
 class CanvasDB:
