@@ -24,7 +24,7 @@ class AioHttpMozillaCookieJar(aiohttp.cookiejar.CookieJar):
         jar.load(str(file_path), ignore_discard=True, ignore_expires=True)
 
         @operator.call
-        def cookies():  # noqa: ANN202
+        def cookies():  # type: ignore[no-untyped-def]  # noqa: ANN202
             for cookie in jar:
                 morsel = http.cookies.Morsel[str]()
                 assert cookie.value is not None

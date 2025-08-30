@@ -6,14 +6,14 @@ import sqlite3
 from functools import cache, cached_property
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Self, assert_never, cast, overload
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Self, assert_never, cast, overload
 
 from pydantic import TypeAdapter
 
 from canvas_dl.canvas import models
 
 
-class TableDescriptor[DB, Info, Handler]:
+class TableDescriptor[DB, Info, Handler: 'TableHandler']:
     handler: Callable[[Info, DB], Handler]
     info: Info
 
@@ -25,7 +25,7 @@ class TableDescriptor[DB, Info, Handler]:
     def __get__(self, obj: None, objtype: Any = None) -> Self: ...  # noqa: ANN401
     @overload
     def __get__(self, obj: DB, objtype: Any = None) -> Handler: ...  # noqa: ANN401
-    def __get__(self, obj, objtype=None):
+    def __get__(self, obj: DB | None, objtype: Any = None) -> Self | Handler:
         match obj:
             case None:
                 return self
@@ -36,9 +36,23 @@ class TableDescriptor[DB, Info, Handler]:
         return f'TableDescriptor(info={self.info!r}, handler={self.handler!r})'
 
 
-class _DBResourceTableInfo[M: models.Model, ID](abc.ABC):
+class TableHandler(Protocol):
+    def create_table(self) -> None: ...
+
+
+class ResourceItem(abc.ABC):
+    @abc.abstractmethod
+    def to_db_json(self, /) -> Any: ...  # noqa: ANN401
+    @abc.abstractmethod
+    def to_db_json_hash_normalized(self, /) -> Any: ...  # noqa: ANN401
+    @abc.abstractmethod
+    @classmethod
+    def from_db_json(cls, data: Any, /) -> Self: ...  # noqa: ANN401
+
+
+class _DBResourceTableInfo[M: ResourceItem, ID](abc.ABC):
     table_name: str
-    model: type[M]
+    model: type[M] | Callable[[M], M]
     id_column_names: tuple[str, ...]
 
     @abc.abstractmethod
@@ -67,10 +81,10 @@ class _DBResourceTableInfo[M: models.Model, ID](abc.ABC):
         return ', '.join(f':{n}' for n in self.id_column_names)
 
 
-class _DBRTI_Simple[M: models.Model, ID: int](_DBResourceTableInfo[M, ID]):
+class _DBRTI_Simple[M: ResourceItem, ID: int](_DBResourceTableInfo[M, ID]):
     id_column_names = ('id',)
 
-    def __init__(self, table_name: str, model: type[M], /) -> None:
+    def __init__(self, table_name: str, model: type[M] | Callable[[M], M], /) -> None:
         self.table_name = table_name
         self.model = model
 
@@ -78,12 +92,12 @@ class _DBRTI_Simple[M: models.Model, ID: int](_DBResourceTableInfo[M, ID]):
         return {'id': id_}
 
 
-class _DBRTI_WithinCourse[M: models.Model, MainID: int](
+class _DBRTI_WithinCourse[M: ResourceItem, MainID: int](
     _DBResourceTableInfo[M, tuple[MainID, models.CourseId]]
 ):
     id_column_names = 'id', 'course_id'
 
-    def __init__(self, table_name: str, model: type[M], /) -> None:
+    def __init__(self, table_name: str, model: type[M] | Callable[[M], M], /) -> None:
         self.table_name = table_name
         self.model = model
 
@@ -92,12 +106,12 @@ class _DBRTI_WithinCourse[M: models.Model, MainID: int](
         return {'id': id_, 'course_id': course_id}
 
 
-class _DBRTI_WithinCourseModule[M: models.Model, MainID: int](
+class _DBRTI_WithinCourseModule[M: ResourceItem, MainID: int](
     _DBResourceTableInfo[M, tuple[MainID, models.CourseId, models.ModuleId]]
 ):
     id_column_names = 'id', 'course_id', 'module_id'
 
-    def __init__(self, table_name: str, model: type[M], /) -> None:
+    def __init__(self, table_name: str, model: type[M] | Callable[[M], M], /) -> None:
         self.table_name = table_name
         self.model = model
 
@@ -108,7 +122,7 @@ class _DBRTI_WithinCourseModule[M: models.Model, MainID: int](
         return {'id': id_, 'course_id': course_id, 'module_id': module_id}
 
 
-class _DBResourceTable[M: models.Model, ID]:
+class _DBResourceTable[M: ResourceItem, ID](TableHandler):
     __info: _DBResourceTableInfo[M, ID]
     __db: 'CanvasDB'
 
@@ -164,18 +178,22 @@ class _DBResourceTable[M: models.Model, ID]:
         with self.__db_con:
             id_cols = self.__info.id_to_column_dict(id_)
             existing_data_hash, prev_version = cast(
-                tuple[str, int] | None,
+                tuple[int, int] | None,
                 self.__db_con.execute(
-                    self.__info.query_select(('data_hash', 'version')), tuple(id_cols.values())
+                    self.__info.query_select(('data_hash', 'version')), id_cols
                 ).fetchone(),
             ) or (None, -1)
-            new_data = json.dumps(item._raw, sort_keys=True)
+            new_data = json.dumps(item.to_db_json(), sort_keys=True)
             # (we moduldo the hash digest down to a signed 64-bit int since that's what sqlite3 takes)
             new_data_hash = int.from_bytes(
-                item.hash_for_db(hashlib.sha256(usedforsecurity=False)).digest()[-8:],
+                hashlib.sha256(
+                    json.dumps(item.to_db_json_hash_normalized(), sort_keys=True).encode('utf-8'),
+                    usedforsecurity=False,
+                ).digest()[-8:],
                 'big',
                 signed=True,
             )
+
             if existing_data_hash is not None and existing_data_hash == new_data_hash:
                 if not dry_run:
                     # TODO last_seen_on should be max'd not just set
@@ -209,9 +227,18 @@ class _DBResourceTable[M: models.Model, ID]:
 class CanvasDB:
     db: sqlite3.Connection
 
+    def all_tables(self) -> list[TableHandler]:
+        return [
+            getattr(self, k) for k, v in vars(type(self)).items() if isinstance(v, TableDescriptor)
+        ]
+
     # tables
     courses = TableDescriptor(
         _DBResourceTable, _DBRTI_Simple[models.Course, models.CourseId]('course', models.Course)
+    )
+    course_root_folder = TableDescriptor(
+        _DBResourceTable,
+        _DBRTI_Simple[models.FolderId, models.CourseId]('course_root_folder', models.FolderId),
     )
     folders = TableDescriptor(
         _DBResourceTable, _DBRTI_Simple[models.Folder, models.FolderId]('folder', models.Folder)
@@ -230,13 +257,10 @@ class CanvasDB:
         ),
     )
 
-    def __init__(self, path: str | PathLike, /) -> None:
+    def __init__(self, path: str | PathLike[str], /) -> None:
         path = Path(path)
         needs_setup = not path.exists()
         self.db = sqlite3.connect(path)
         if needs_setup:
-            self.courses.create_table()
-            self.folders.create_table()
-            self.files.create_table()
-            self.modules.create_table()
-            self.module_items.create_table()
+            for table in self.all_tables():
+                table.create_table()

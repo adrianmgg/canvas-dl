@@ -1,15 +1,15 @@
 import datetime
-import hashlib
-import json
 from copy import deepcopy
-from typing import Any, Literal, NewType, Self
+from typing import Any, Literal, Self
 
 import pydantic
 from pydantic import BaseModel, model_validator
 from yarl import URL
 
+import canvas_dl.canvas.db
 
-class Model(BaseModel):
+
+class Model(BaseModel, canvas_dl.canvas.db.ResourceItem):
     class Config:
         extra = 'allow'
 
@@ -24,19 +24,46 @@ class Model(BaseModel):
         ret._raw = data
         return ret
 
-    def _normalize_for_db_hash(self, data: Any, /) -> Any:  # noqa: ANN401
-        return data
+    def to_db_json(self, /) -> Any:  # noqa: ANN401
+        return self._raw
 
-    def hash_for_db[H: 'hashlib._Hash'](self, h: H, /) -> H:
-        h.update(json.dumps(self._normalize_for_db_hash(self._raw), sort_keys=True).encode('utf-8'))
-        return h
+    def to_db_json_hash_normalized(self, /) -> Any:  # noqa: ANN401
+        return self._raw
+
+    @classmethod
+    def from_db_json(cls, data: Any, /) -> Self:  # noqa: ANN401
+        return cls.model_validate(data)
 
 
-CourseId = NewType('CourseId', int)
-FolderId = NewType('FolderId', int)
-FileId = NewType('FileId', int)
-ModuleId = NewType('ModuleId', int)
-ModuleItemId = NewType('ModuleItemId', int)
+class Id(int, canvas_dl.canvas.db.ResourceItem):
+    def to_db_json(self, /) -> Any:  # noqa: ANN401
+        return self
+
+    def to_db_json_hash_normalized(self, /) -> Any:  # noqa: ANN401
+        return self
+
+    @classmethod
+    def from_db_json(cls, data: Any, /) -> Self:  # noqa: ANN401
+        match data:
+            case int(val):
+                return cls(val)
+            case other:
+                raise TypeError(f'expected int argument, got {type(other)}')
+
+
+class CourseId(Id): ...
+
+
+class FolderId(Id): ...
+
+
+class FileId(Id): ...
+
+
+class ModuleId(Id): ...
+
+
+class ModuleItemId(Id): ...
 
 
 # https://developerdocs.instructure.com/services/canvas/resources/courses#course
@@ -62,8 +89,8 @@ class Course(Model):
     image_download_url: str | None = None
     banner_image_download_url: str | None = None
 
-    def _normalize_for_db_hash(self, data: Any, /) -> Any:  # noqa: ANN401
-        data = deepcopy(data)
+    def to_db_json_hash_normalized(self, /) -> Any:  # noqa: ANN401
+        data = deepcopy(super().to_db_json_hash_normalized())
         for url_key in 'image_download_url', 'banner_image_download_url':
             if url_key in data and isinstance(url := data[url_key], str):
                 try:
