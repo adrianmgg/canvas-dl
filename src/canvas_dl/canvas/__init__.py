@@ -1,11 +1,12 @@
 import http.cookies
 import operator
 import typing
+from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from types import TracebackType
-from typing import AsyncIterator, TypedDict, Unpack
+from typing import TypedDict, Unpack
 
 import aiohttp
 import aiohttp.typedefs

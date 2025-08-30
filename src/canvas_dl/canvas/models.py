@@ -1,21 +1,30 @@
+import abc
 import datetime
 from copy import deepcopy
 from typing import Any, Literal, Self
 
 import pydantic
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, RootModel, model_validator
 from yarl import URL
 
-import canvas_dl.canvas.db
+
+class DBResourceItem(abc.ABC):
+    @abc.abstractmethod
+    def to_db_json(self, /) -> Any: ...  # noqa: ANN401
+    @abc.abstractmethod
+    def to_db_json_hash_normalized(self, /) -> Any: ...  # noqa: ANN401
+    @classmethod
+    @abc.abstractmethod
+    def from_db_json(cls, data: Any, /) -> Self: ...  # noqa: ANN401
 
 
-class Model(BaseModel, canvas_dl.canvas.db.ResourceItem):
+class Model(BaseModel, DBResourceItem):
     class Config:
         extra = 'allow'
 
     _raw: Any
 
-    # TODO add a wrap validator to debug log any extra fields
+    # TODO add a wrap validator to debug log any extra fields?
 
     @model_validator(mode='wrap')
     @classmethod
@@ -35,12 +44,12 @@ class Model(BaseModel, canvas_dl.canvas.db.ResourceItem):
         return cls.model_validate(data)
 
 
-class Id(int, canvas_dl.canvas.db.ResourceItem):
+class IdModel(RootModel[int], DBResourceItem):
     def to_db_json(self, /) -> Any:  # noqa: ANN401
-        return self
+        return self.root
 
     def to_db_json_hash_normalized(self, /) -> Any:  # noqa: ANN401
-        return self
+        return self.root
 
     @classmethod
     def from_db_json(cls, data: Any, /) -> Self:  # noqa: ANN401
@@ -50,20 +59,23 @@ class Id(int, canvas_dl.canvas.db.ResourceItem):
             case other:
                 raise TypeError(f'expected int argument, got {type(other)}')
 
-
-class CourseId(Id): ...
-
-
-class FolderId(Id): ...
+    def __str__(self) -> str:
+        return str(self.root)
 
 
-class FileId(Id): ...
+class CourseId(IdModel): ...
 
 
-class ModuleId(Id): ...
+class FolderId(IdModel): ...
 
 
-class ModuleItemId(Id): ...
+class FileId(IdModel): ...
+
+
+class ModuleId(IdModel): ...
+
+
+class ModuleItemId(IdModel): ...
 
 
 # https://developerdocs.instructure.com/services/canvas/resources/courses#course

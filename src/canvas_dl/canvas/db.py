@@ -3,10 +3,11 @@ import datetime
 import hashlib
 import json
 import sqlite3
+from collections.abc import Callable
 from functools import cache, cached_property
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol, Self, assert_never, cast, overload
+from typing import TYPE_CHECKING, Any, Protocol, Self, assert_never, cast, overload
 
 from pydantic import TypeAdapter
 
@@ -40,17 +41,7 @@ class TableHandler(Protocol):
     def create_table(self) -> None: ...
 
 
-class ResourceItem(abc.ABC):
-    @abc.abstractmethod
-    def to_db_json(self, /) -> Any: ...  # noqa: ANN401
-    @abc.abstractmethod
-    def to_db_json_hash_normalized(self, /) -> Any: ...  # noqa: ANN401
-    @abc.abstractmethod
-    @classmethod
-    def from_db_json(cls, data: Any, /) -> Self: ...  # noqa: ANN401
-
-
-class _DBResourceTableInfo[M: ResourceItem, ID](abc.ABC):
+class _DBResourceTableInfo[M: models.DBResourceItem, ID](abc.ABC):
     table_name: str
     model: type[M] | Callable[[M], M]
     id_column_names: tuple[str, ...]
@@ -81,7 +72,7 @@ class _DBResourceTableInfo[M: ResourceItem, ID](abc.ABC):
         return ', '.join(f':{n}' for n in self.id_column_names)
 
 
-class _DBRTI_Simple[M: ResourceItem, ID: int](_DBResourceTableInfo[M, ID]):
+class _DBRTI_Simple[M: models.DBResourceItem, ID: models.IdModel](_DBResourceTableInfo[M, ID]):
     id_column_names = ('id',)
 
     def __init__(self, table_name: str, model: type[M] | Callable[[M], M], /) -> None:
@@ -89,10 +80,10 @@ class _DBRTI_Simple[M: ResourceItem, ID: int](_DBResourceTableInfo[M, ID]):
         self.model = model
 
     def id_to_column_dict(self, id_: ID, /) -> dict[str, int]:
-        return {'id': id_}
+        return {'id': id_.root}
 
 
-class _DBRTI_WithinCourse[M: ResourceItem, MainID: int](
+class _DBRTI_WithinCourse[M: models.DBResourceItem, MainID: models.IdModel](
     _DBResourceTableInfo[M, tuple[MainID, models.CourseId]]
 ):
     id_column_names = 'id', 'course_id'
@@ -103,10 +94,10 @@ class _DBRTI_WithinCourse[M: ResourceItem, MainID: int](
 
     def id_to_column_dict(self, ids: tuple[MainID, models.CourseId], /) -> dict[str, int]:
         id_, course_id = ids
-        return {'id': id_, 'course_id': course_id}
+        return {'id': id_.root, 'course_id': course_id.root}
 
 
-class _DBRTI_WithinCourseModule[M: ResourceItem, MainID: int](
+class _DBRTI_WithinCourseModule[M: models.DBResourceItem, MainID: models.IdModel](
     _DBResourceTableInfo[M, tuple[MainID, models.CourseId, models.ModuleId]]
 ):
     id_column_names = 'id', 'course_id', 'module_id'
@@ -119,10 +110,10 @@ class _DBRTI_WithinCourseModule[M: ResourceItem, MainID: int](
         self, ids: tuple[MainID, models.CourseId, models.ModuleId], /
     ) -> dict[str, int]:
         id_, course_id, module_id = ids
-        return {'id': id_, 'course_id': course_id, 'module_id': module_id}
+        return {'id': id_.root, 'course_id': course_id.root, 'module_id': module_id.root}
 
 
-class _DBResourceTable[M: ResourceItem, ID](TableHandler):
+class _DBResourceTable[M: models.DBResourceItem, ID](TableHandler):
     __info: _DBResourceTableInfo[M, ID]
     __db: 'CanvasDB'
 
@@ -240,6 +231,7 @@ class CanvasDB:
         _DBResourceTable,
         _DBRTI_Simple[models.FolderId, models.CourseId]('course_root_folder', models.FolderId),
     )
+    """root folder of each course"""
     folders = TableDescriptor(
         _DBResourceTable, _DBRTI_Simple[models.Folder, models.FolderId]('folder', models.Folder)
     )

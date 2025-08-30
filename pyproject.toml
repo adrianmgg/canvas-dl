@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-canvas-dl = "canvas_dl:cli"
+canvas-dl = "canvas_dl:main"
 
 [build-system]
 requires = ["uv_build>=0.8.0,<0.9"]
@@ -34,7 +34,13 @@ strict = true
 line-length = 100
 
 [tool.ruff.lint]
-extend-select = ["ANN", "B", "A", "I"]
+extend-select = [
+    "ANN",
+    "B",
+    "A",
+    "I",
+    "UP",  # pyupgrade
+]
 
 [tool.ruff.lint.isort]
 split-on-trailing-comma = false
