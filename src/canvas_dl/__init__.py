@@ -51,7 +51,23 @@ async def main(*, site: URL, cookies_file: Path, output_root: Path) -> None:
     db = CanvasDB(output_root / 'db.sqlite3')
     async with canvas.Canvas.new_simple(url=site, cookies_file=cookies_file) as api:
         async for course in api.list_courses():
-            # course_files_dir = output_root / 'courses' / str(course.id) / 'files'
+            course_files_dir = output_root / 'courses' / str(course.id) / 'files'
+
+            async for folder in api.list_course_folders(course.id):
+                try:
+                    async for file in api.list_folder_files(folder.id):
+                        outpath = (
+                            course_files_dir / f'{folder.full_name}/[{file.id}] {file.filename}'
+                        )
+                        print(f'downloading {outpath}')
+                        async with api._session.get(file.url) as file_response:
+                            if not file_response.ok:
+                                print(f'  ERR: failed downloading ({file_response.status})')
+                            else:
+                                outpath.parent.mkdir(parents=True, exist_ok=True)
+                                outpath.write_bytes(await file_response.read())
+                except:
+                    print(f'ERROR LISTING FILES FOR FOLDER {folder} (this happens sometimes)')
 
             db.courses.insert(course.id, course)
             async for module in api.list_course_modules(course.id):
